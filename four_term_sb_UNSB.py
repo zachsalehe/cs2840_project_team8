@@ -189,26 +189,34 @@ class DriftUNet(nn.Module):
 # =========================================================
 # =================== Config Class ========================
 # =========================================================
-
 @dataclass
 class FourTermConfig:
+    # SDE / discretization
     sigma: float = 0.1
     n_steps: int = 10
+    # Reference drift
     ref_mode: str = "zero"
     ref_lam: float = 1.0
+    # Unbalanced Sinkhorn (optimized in loss)
     eps_sink: float = 0.1
     tau_sink: float = 0.5
     sink_iters: int = 50
+    # Loss weights
     lambda_cyc: float = 1.0
     lambda_X: float = 10.0
     lambda_Y: float = 10.0
+    # Optim (drifts)
     lr_phi: float = 2e-4
     lr_theta: float = 2e-4
+    # Optional adversarial marginals (off by default for formal UNSB)
+    use_adv: bool = False
+    adv_weight: float = 1.0
     lr_d: float = 2e-4
     d_steps: int = 1
-    adv_weight: float = 1.0
+    # Misc
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     log_dir: str = "./runs_unsb"
+
 
 
 # =========================================================
@@ -290,91 +298,117 @@ class FourTermSBTrainer:
         x1, _ = self._em_forward(y0, mask)
         return x1
 
-    # ---------- Train Step ----------
     def train_step(self, batch_y_img, batch_y_mask, batch_x_img, batch_x_mask):
-        """Single training iteration."""
+        """
+        Formal UNSB generator objective:
+        L = L_SB
+            + lambda_X * UOT(X1_f || p_X)
+            + lambda_Y * UOT(X0_b || p_Y)
+            + lambda_cyc * L_cyc
+            [+ adv_weight * L_adv  (optional)]
+        """
+        # --- Sanitize masks ---
         my = batch_y_mask.float().clamp(0.0, 1.0)
         mx = batch_x_mask.float().clamp(0.0, 1.0)
 
-        # Construct degraded Y
+        # --- Build degraded y (p_Y sample) ---
         noise = torch.empty_like(batch_y_img).uniform_(-1.0, 1.0)
         y = batch_y_img * (1.0 - my) + noise * my
-        x = batch_x_img
+        x = batch_x_img  # p_X sample
 
-        # Forward/backward bridges
-        X1_f, _ = self._em_forward(y, my)
-        X0_b, _ = self._em_backward(x, mx)
+        # --- Simulate bridges & energies ---
+        X1_f, energy_f = self._em_forward(y, my)   # forward terminal
+        X0_b, energy_b = self._em_backward(x, mx) # backward initial
 
-        # Cycle consistency
-        tilde_y, _ = self._em_backward(X1_f.detach(), my)
-        tilde_x, _ = self._em_forward(X0_b.detach(), mx)
-        rho = 0.7
-        L_cyc_y = (F.l1_loss(tilde_y * (1 - my), y * (1 - my)) +
-                   rho * F.l1_loss(tilde_y * my, y * my))
-        L_cyc_x = F.l1_loss(tilde_x, x)
-        L_cyc = L_cyc_y + L_cyc_x
+        # SB path energy (symmetric)
+        L_sb = (energy_f + energy_b) / (2.0 * (self.cfg.sigma ** 2))
 
-        # Unbalanced Sinkhorn endpoint terms
-        S_forward = uot_only_masked(X1_f, x.detach(), my,
+        # --- Endpoint UOT (UNBALANCED) ---
+        S_forward  = uot_only_masked(X1_f, x.detach(), my,
                                     self.cfg.eps_sink, self.cfg.tau_sink, self.cfg.sink_iters)
         S_backward = uot_only_masked(X0_b, y.detach(), mx,
-                                     self.cfg.eps_sink, self.cfg.tau_sink, self.cfg.sink_iters)
+                                    self.cfg.eps_sink, self.cfg.tau_sink, self.cfg.sink_iters)
 
-        # ========== UNSB adversarial losses ==========
-        for _ in range(self.cfg.d_steps):
-            # D_X
-            self.opt_DX.zero_grad(set_to_none=True)
-            dx_real = self.D_X(x)
-            dx_fake = self.D_X(X1_f.detach())
-            dX_loss = (torch.relu(1.0 - dx_real).mean() +
-                       torch.relu(1.0 + dx_fake).mean())
-            dX_loss.backward()
-            self.opt_DX.step()
+        # --- Cycle consistency ---
+        with torch.no_grad():
+            # Stop gradients across legs for the cycle targets
+            X1_f_ng = X1_f.detach()
+            X0_b_ng = X0_b.detach()
+        tilde_y, _ = self._em_backward(X1_f_ng, my)   # grads -> f_theta only
+        tilde_x, _ = self._em_forward(X0_b_ng, mx)   # grads -> f_phi only
 
-            # D_Y
-            self.opt_DY.zero_grad(set_to_none=True)
-            dy_real = self.D_Y(y)
-            dy_fake = self.D_Y(X0_b.detach())
-            dY_loss = (torch.relu(1.0 - dy_real).mean() +
-                       torch.relu(1.0 + dy_fake).mean())
-            dY_loss.backward()
-            self.opt_DY.step()
+        rho = 0.7
+        L_cyc_y = (F.l1_loss(tilde_y * (1 - my), y * (1 - my))
+                + rho * F.l1_loss(tilde_y * my, y * my))
+        L_cyc_x = F.l1_loss(tilde_x, x)
+        L_cyc   = L_cyc_y + L_cyc_x
 
-        # Generator adversarial loss
-        L_adv = self.cfg.adv_weight * (-self.D_X(X1_f).mean() - self.D_Y(X0_b).mean())
+        # --- Optional adversarial marginals (off by default) ---
+        if getattr(self.cfg, "use_adv", False):
+            # Update discriminators
+            for _ in range(self.cfg.d_steps):
+                # D_X
+                self.opt_DX.zero_grad(set_to_none=True)
+                dx_real = self.D_X(x)
+                dx_fake = self.D_X(X1_f.detach())
+                dX_loss = (torch.relu(1.0 - dx_real).mean()
+                        + torch.relu(1.0 + dx_fake).mean())
+                dX_loss.backward()
+                self.opt_DX.step()
+                # D_Y
+                self.opt_DY.zero_grad(set_to_none=True)
+                dy_real = self.D_Y(y)
+                dy_fake = self.D_Y(X0_b.detach())
+                dY_loss = (torch.relu(1.0 - dy_real).mean()
+                        + torch.relu(1.0 + dy_fake).mean())
+                dY_loss.backward()
+                self.opt_DY.step()
 
-        # Total loss
-        loss = L_adv + self.cfg.lambda_cyc * L_cyc
+            # Generator adversarial term
+            L_adv = self.cfg.adv_weight * (-self.D_X(X1_f).mean() - self.D_Y(X0_b).mean())
+        else:
+            dX_loss = torch.tensor(0.0, device=x.device)
+            dY_loss = torch.tensor(0.0, device=x.device)
+            L_adv   = torch.tensor(0.0, device=x.device)
 
+        # --- Formal UNSB total loss (optimize UOT directly) ---
+        loss = L_sb \
+            + self.cfg.lambda_X * S_forward \
+            + self.cfg.lambda_Y * S_backward \
+            + self.cfg.lambda_cyc * L_cyc \
+            + L_adv
+
+        # --- Optimize drifts ---
         self.opt_phi.zero_grad(set_to_none=True)
         self.opt_th.zero_grad(set_to_none=True)
         loss.backward()
         self.opt_phi.step()
         self.opt_th.step()
 
-        # Metrics
+        # --- Metrics ---
         with torch.no_grad():
             metrics = {
+                "L_sb": float(L_sb.item()),
+                "S_forward": float(S_forward.item()),
+                "S_backward": float(S_backward.item()),
                 "L_cyc": float(L_cyc.item()),
                 "L_adv": float(L_adv.item()),
                 "D_X": float(dX_loss.item()),
                 "D_Y": float(dY_loss.item()),
-                "S_forward": float(S_forward.item()),
-                "S_backward": float(S_backward.item()),
             }
 
-        return metrics, {"X1_f": X1_f.detach(), "X0_b": X0_b.detach(), "y": y.detach(), "x": x.detach()}
+        return metrics, {
+            "X1_f": X1_f.detach(), "X0_b": X0_b.detach(),
+            "y": y.detach(), "x": x.detach()
+        }
+
     
 
 # =========================================================
 # =============== Convenience Training Loop ===============
 # =========================================================
-import os
 from pathlib import Path
 from dataclasses import asdict
-from torch.utils.data import DataLoader
-from torchvision.utils import make_grid, save_image
-import torch
 
 def train_four_term_sb(dataset_cls,
                        epochs: int = 5,
