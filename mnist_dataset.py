@@ -10,7 +10,7 @@ from masks import center_crop_masks, perlin_masks
 
 
 class MNISTDataset(Dataset):
-    def __init__(self, split="train", digits=range(10), mask_type="perlin", mask_area=0.2, mask_scale=1.0):
+    def __init__(self, split="train", digits=range(10), mask_type="perlin", mask_area=0.2, mask_scale=1.0, usps=False):
         """
         split: in ['train', 'test']
                which data split to use
@@ -36,10 +36,12 @@ class MNISTDataset(Dataset):
         self.mask_type = mask_type
         self.mask_area = mask_area
         self.mask_scale = mask_scale
+        
+        self.dset = "mnist" if not usps else "usps"
 
         self.imgs = []
         for d in digits:
-            img_paths = sorted(glob(f"mnist/{split}/{d}/*.jpg"))
+            img_paths = sorted(glob(f"{self.dset}/{split}/{d}/*.jpg"))
             for img_path in img_paths:
                 img = Image.open(img_path).convert('L')
                 self.imgs.append(img)
