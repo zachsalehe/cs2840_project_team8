@@ -111,7 +111,9 @@ class DriftUNet(nn.Module):
         xu2 = self.u2(xdc1)
         xcat2 = torch.cat([xu2, x0], dim=1)
         xdc2 = self.dc2(xcat2)
-        return self.outc(xdc2)
+        out = self.outc(xdc2)
+        # Clamp output to prevent explosions
+        return out.clamp(-5.0, 5.0)
 
 # -------------------------
 # Config
@@ -195,8 +197,12 @@ class I3SBTrainer:
             
             noise = torch.randn_like(x) * (self.cfg.sigma * math.sqrt(dt))
             new_x = x + drift * dt + noise
+            
+            # Clamp to prevent explosions
+            new_x = new_x.clamp(-10.0, 10.0)
+            
             m = mask.bool()
-            x = torch.where(m, new_x, y)
+            x = torch.where(m, new_x, x_0)
             
         return x, energy
 
@@ -225,8 +231,12 @@ class I3SBTrainer:
             
             noise = torch.randn_like(y) * (self.cfg.sigma * math.sqrt(dt))
             new_y = y + (-drift_t) * dt + noise
+            
+            # Clamp to prevent explosions
+            new_y = new_y.clamp(-10.0, 10.0)
+            
             m = mask.bool()
-            y = torch.where(m, new_y, x_clean)
+            y = torch.where(m, new_y, x_1)
             
         return y, energy
 
@@ -252,11 +262,16 @@ class I3SBTrainer:
                    batch_y_img: torch.Tensor, 
                    batch_y_mask: torch.Tensor,
                    batch_x_img: torch.Tensor, 
-                   batch_x_mask: torch.Tensor):
+                   batch_x_mask: torch.Tensor,
+                   profile: bool = False):
         """
         Train one step of I³SB.
         Returns dict with scalar losses and samples.
         """
+        import time
+        times = {} if profile else None
+        t0 = time.time() if profile else None
+        
         # Sanitize masks
         my = batch_y_mask.to(batch_y_img.dtype).clamp(0.0, 1.0)
         mx = batch_x_mask.to(batch_x_img.dtype).clamp(0.0, 1.0)
@@ -266,26 +281,55 @@ class I3SBTrainer:
         y = batch_y_img * (1.0 - my) + noise * my
         x = batch_x_img
         
+        if profile:
+            times['prep'] = time.time() - t0
+            t0 = time.time()
+        
         # Simulate both bridges
         X1_f, energy_f = self._em_forward(y, my)
+        
+        if profile:
+            times['forward_bridge'] = time.time() - t0
+            t0 = time.time()
+            
         X0_b, energy_b = self._em_backward(x, mx)
+        
+        if profile:
+            times['backward_bridge'] = time.time() - t0
+            t0 = time.time()
         
         # L_SB: path/energy matching
         L_sb = (energy_f + energy_b) / (2.0 * (self.cfg.sigma ** 2))
         
-        # Balanced endpoint matching (simple MSE)
+        # Balanced endpoint matching
         loss_fwd = F.mse_loss(X1_f, x.detach())
         loss_bwd = F.mse_loss(X0_b, y.detach())
         
         # Total loss (no cycle term in I³SB)
         loss = L_sb + self.cfg.lambda_forward * loss_fwd + self.cfg.lambda_backward * loss_bwd
         
+        if profile:
+            times['loss_calc'] = time.time() - t0
+            t0 = time.time()
+        
         # Optimize
         self.opt_phi.zero_grad(set_to_none=True)
         self.opt_th.zero_grad(set_to_none=True)
         loss.backward()
+        
+        if profile:
+            times['backward_pass'] = time.time() - t0
+            t0 = time.time()
+        
+        # Gradient clipping to prevent explosions
+        torch.nn.utils.clip_grad_norm_(self.f_phi.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.f_theta.parameters(), max_norm=1.0)
+        
         self.opt_phi.step()
         self.opt_th.step()
+        
+        if profile:
+            times['optimizer_step'] = time.time() - t0
         
         # Metrics
         with torch.no_grad():
@@ -295,6 +339,8 @@ class I3SBTrainer:
                 "loss_forward": loss_fwd.item(),
                 "loss_backward": loss_bwd.item(),
             }
+            if profile:
+                metrics['times'] = times
         
         return metrics, {
             "X1_f": X1_f.detach(), 
@@ -399,16 +445,28 @@ def train_i3sb(dataset_cls,
             # Train step
             metrics, samples = trainer.train_step(
                 batch_y_img=imgY, batch_y_mask=maskY,
-                batch_x_img=imgX, batch_x_mask=maskX
+                batch_x_img=imgX, batch_x_mask=maskX,
+                profile=(step == 0)  # Profile first step only
             )
+            
+            # MPS memory fix: clear cache after every step to prevent fragmentation
+            if cfg.device == "mps":
+                torch.mps.empty_cache()
+                torch.mps.synchronize()  # Ensure operations complete
             
             # Logging
             if (step % log_every) == 0:
-                msg = " | ".join([f"{k}:{v:.4f}" for k, v in metrics.items()])
+                msg = " | ".join([f"{k}:{v:.4f}" for k, v in metrics.items() if k != 'times'])
                 print(f"[e{epoch:02d} s{step:05d}] {msg}")
+                
+                # Print timing breakdown on first step
+                if step == 0 and 'times' in metrics:
+                    print("  Timing breakdown (seconds):")
+                    for k, v in metrics['times'].items():
+                        print(f"    {k}: {v:.3f}s")
             
             # Visualizations (same structure as four_term_sb)
-            if (step % vis_every) == 0:
+            if (step % vis_every) == 0 and step > 0:  # Skip step 0 to save time
                 with torch.no_grad():
                     # Backward pair: x -> X0_b(x)
                     grid_bwd = make_grid(
@@ -436,7 +494,7 @@ def train_i3sb(dataset_cls,
                     save_image(grid_cyc, img_dir / f"cycle_e{epoch:03d}_s{step:06d}.png")
             
             # Periodic checkpointing
-            if (step % save_every == 0) or (step == 0):
+            if (step % save_every == 0) and step > 0:  # Skip step 0
                 tag = f"e{epoch:03d}_s{step:06d}"
                 path = ckpt_dir / f"ckpt_{tag}.pt"
                 payload = {
