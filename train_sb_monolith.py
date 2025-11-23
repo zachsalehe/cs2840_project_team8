@@ -24,7 +24,7 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
             eps_sink=0.08, tau_sink=0.8, sink_iters=80,
             lambda_X=5.0, lambda_Y=5.0, lambda_cyc=0.0,
             lr_phi=2e-4, lr_theta=2e-4,
-            device="cpu", log_dir="./runs_i2sb_mnist",
+            device="mps", log_dir="./runs_i2sb_mnist",
             **ds_defaults,
         )
     if method == "fourterm":
@@ -46,7 +46,7 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
             eps_sink=0.35, tau_sink=0.8, sink_iters=25,
             lambda_X=10.0, lambda_Y=10.0, lambda_cyc=0.5,
             lr_phi=2e-4, lr_theta=2e-4,
-            device="cpu", log_dir="./runs_unsb_mnist",
+            device="mps", log_dir="./runs_unsb_mnist",
             **ds_defaults,
         )
     if method == "i3sb":
@@ -56,7 +56,7 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
             ref_mode="zero", ref_lam=1.0,
             lambda_forward=1.0, lambda_backward=1.0,
             lr_phi=2e-4, lr_theta=2e-4,
-            device="cpu", log_dir="./runs_i3sb_mnist",
+            device="mps", log_dir="./runs_i3sb_mnist",
             **ds_defaults,
         )
     raise ValueError(f"Unknown method: {method}")
@@ -79,7 +79,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", type=str, default="fourterm", choices=["i2sb","fourterm","unsb","i3sb"])
     ap.add_argument("--epochs", type=int, default=5)
-    ap.add_argument("--batch_size", type=int, default=None, help="Default 64 except i3sb=32")
+    ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--pin_memory", action="store_true")
     ap.add_argument("--log_every", type=int, default=100)
@@ -120,8 +120,7 @@ if __name__ == "__main__":
     )
     wrapped = InpaintWrapper(train_ds, sigma=cfg.sigma)
 
-    default_bs = 32 if args.method == "i3sb" else 64
-    bs = args.batch_size or default_bs
+    bs = args.batch_size
     dl = DataLoader(wrapped, batch_size=bs, shuffle=True,
                     num_workers=args.num_workers, pin_memory=args.pin_memory)
 
