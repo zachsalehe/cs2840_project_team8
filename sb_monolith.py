@@ -116,6 +116,10 @@ def em_path(
     device: torch.device,
 ):
     """Generic masked EM path used for both forward/backward traces."""
+    x0 = x0.to(device)
+    cond = cond.to(device)
+    mask = mask.to(device)
+
     b, c, h, w = x0.shape
     x = x0.clone().to(device)
     mask = mask.to(device)
@@ -222,19 +226,36 @@ class UnifiedSB(nn.Module):
     @staticmethod
     def load_ckpt(path: str, map_location: str | torch.device = "cpu") -> "UnifiedSB":
         blob = torch.load(path, map_location=map_location)
+
+        # Detect desired device (stringify torch.device for cfg)
+        if isinstance(map_location, torch.device):
+            target_device_str = map_location.type  # e.g., "cpu", "cuda", "mps"
+        else:
+            target_device_str = str(map_location)
+
+        # Method + cfg
         method = (
             blob.get("meta", {}).get("method")
             or blob.get("cfg", {}).get("method")
             or "fourterm"
         )
         cfg_dict = {**blob.get("cfg", {})}
-        if "method" not in cfg_dict:
-            cfg_dict["method"] = method
+        cfg_dict["method"] = cfg_dict.get("method", method)
+        # >>> Ensure the cfg’s device is the target device <<<
+        cfg_dict["device"] = target_device_str
+
         cfg = UnifiedConfig(**cfg_dict)
-        model = UnifiedSB(cfg)
+
+        # Build model ON the target device
+        model = UnifiedSB(cfg)  # __init__ will self.to(cfg.device)
         state = blob.get("state", {})
-        if "phi" in state: model.phi.load_state_dict(state["phi"], strict=False)
-        if "theta" in state: model.theta.load_state_dict(state["theta"], strict=False)
+        if "phi" in state:
+            model.phi.load_state_dict(state["phi"], strict=False)
+        if "theta" in state:
+            model.theta.load_state_dict(state["theta"], strict=False)
+
+        # Final safety: ensure all params & buffers are on that device
+        model.to(target_device_str)
         return model
 
     def train_step(self, batch, optim_phi, optim_theta):
