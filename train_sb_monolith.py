@@ -52,7 +52,7 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
     if method == "i3sb":
         return UnifiedConfig(
             method="i3sb",
-            sigma=0.5, n_steps=10,
+            sigma=0.5, n_steps=20,
             ref_mode="zero", ref_lam=1.0,
             lambda_forward=1.0, lambda_backward=1.0,
             lr_phi=2e-4, lr_theta=2e-4,
