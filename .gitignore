@@ -1,5 +1,0 @@
-.venv
-.mypy_cache
-__pycache__
-mnist
-runs_i3sb_mnist
