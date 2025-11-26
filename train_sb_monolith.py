@@ -19,10 +19,10 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
     if method == "i2sb":
         return UnifiedConfig(
             method="i2sb",
-            sigma=0.5, n_steps=20,
+            sigma=0.3, n_steps=30,
             ref_mode="zero", ref_lam=1.0,
-            eps_sink=0.08, tau_sink=0.8, sink_iters=80,
-            lambda_X=5.0, lambda_Y=5.0, lambda_cyc=0.0,
+            eps_sink=0.2, tau_sink=0.6, sink_iters=80,
+            lambda_X=10.0, lambda_Y=10.0, lambda_cyc=0.0,
             lr_phi=2e-4, lr_theta=2e-4,
             device="mps", log_dir="./runs_i2sb_mnist",
             **ds_defaults,
@@ -30,10 +30,10 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
     if method == "fourterm":
         return UnifiedConfig(
             method="fourterm",
-            sigma=0.5, n_steps=20,
+            sigma=0.3, n_steps=30,
             ref_mode="zero", ref_lam=1.0,
-            eps_sink=0.08, tau_sink=0.8, sink_iters=80,
-            lambda_X=5.0, lambda_Y=5.0, lambda_cyc=1.0,
+            eps_sink=0.2, tau_sink=0.6, sink_iters=80,
+            lambda_X=10.0, lambda_Y=10.0, lambda_cyc=0.5,
             lr_phi=2e-4, lr_theta=2e-4,
             device="mps", log_dir="./runs_fourterm_mnist",
             **ds_defaults,
@@ -41,9 +41,9 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
     if method == "unsb":
         return UnifiedConfig(
             method="unsb",
-            sigma=0.5, n_steps=30,
+            sigma=0.3, n_steps=30,
             ref_mode="ou", ref_lam=1.0,
-            eps_sink=0.35, tau_sink=0.8, sink_iters=25,
+            eps_sink=0.2, tau_sink=0.6, sink_iters=80,
             lambda_X=10.0, lambda_Y=10.0, lambda_cyc=0.5,
             lr_phi=2e-4, lr_theta=2e-4,
             device="mps", log_dir="./runs_unsb_mnist",
@@ -52,7 +52,7 @@ def default_cfg_for_method(method: str) -> UnifiedConfig:
     if method == "i3sb":
         return UnifiedConfig(
             method="i3sb",
-            sigma=0.5, n_steps=20,
+            sigma=0.3, n_steps=30,
             ref_mode="zero", ref_lam=1.0,
             lambda_forward=1.0, lambda_backward=1.0,
             lr_phi=2e-4, lr_theta=2e-4,
