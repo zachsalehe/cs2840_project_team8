@@ -1,14 +1,3 @@
-
-"""
-eval_sb_monolith_tqdm.py
-------------------------
-Evaluates all checkpoints in a directory on the same test set/batches, with:
-- Per-model tqdm progress bar
-- Consistent random example selection across models for saved images
-  (same datapoints chosen once; clean/masked saved once; each model saves its recon)
-- MNIST/USPS support (test split), digit selection logic (union of untrained digits
-  across models; fallback to all digits), SSIM + LPIPS (safe for MNIST)
-"""
 from __future__ import annotations
 import argparse, os, glob, json, random
 from typing import Tuple, List, Dict, Set
@@ -92,6 +81,8 @@ def main():
     ap.add_argument('--ckpt_dir', type=str, required=True, help='Directory containing model .pt checkpoints')
     ap.add_argument('--dataset', type=str, default='mnist', choices=['mnist','usps'])
     ap.add_argument('--digits', type=str, default=None, help='Optional override: comma list like 0,1,2')
+    ap.add_argument('--mask_type', type=str, default=None, help='Mask type, either "perlin" or "center"')
+    ap.add_argument('--mask_area', type=str, default=None, help='Fraction of area that mask takes occupies')
     ap.add_argument('--examples', type=int, default=10, help='Number of examples to save')
     ap.add_argument('--batch_size', type=int, default=64)
     ap.add_argument('--device', type=str, default='cpu')
@@ -124,8 +115,8 @@ def main():
 
     # Mask params & sigma from first ckpt
     ref_cfg = cfgs[0]
-    mask_type = ref_cfg.mask_type
-    mask_area = ref_cfg.mask_area
+    mask_type = ref_cfg.mask_type if args.mask_type is None else args.mask_type
+    mask_area = ref_cfg.mask_area if args.mask_area is None else float(args.mask_area)
     mask_scale = ref_cfg.mask_scale
     usps = (args.dataset.lower() == 'usps')
     sigma_for_noise = getattr(ref_cfg, 'sigma', 0.5)
